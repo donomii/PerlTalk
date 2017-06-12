@@ -1,0 +1,3 @@
+
+
+<SQL terminal character> ::= <SQL language character> |   <SQL embedded language character>
