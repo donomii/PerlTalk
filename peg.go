@@ -13,39 +13,42 @@ import (
 var indent = 0
 var indentStep = 4
 
-func startParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, startRule, chain string, start int) (int, bool) {
-    pos, ok := doParse(rulesTable[startRule], rulesTable, input, chain, start)
-    return pos, ok
+func startParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, startRule, chain string, start int) (int, bool, *peg.Ast) {
+    pos, ok, newAst := doParse(rulesTable[startRule], rulesTable, input, chain, start)
+    return pos, ok, newAst
 }
-func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string, start int) (int, bool) {
+func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string, start int) (int, bool, *peg.Ast) {
     pos := start
     ok := false
     newchain := fmt.Sprintf("%v->%v(%v)", chain, ast.Name, ast.Token)
+    newAst := peg.Ast{Name: ast.Name, Token: ast.Token}
     if len(newchain) > 2000 {
         log.Fatal("Deep recursion")
     }
     switch ast.Name {
         case "expression":
         for i, v := range ast.Nodes {
-            pos, ok = doParse(v, rulesTable, input, newchain, pos)
+            var childAst *peg.Ast
+            pos, ok, childAst = doParse(v, rulesTable, input, newchain, pos)
             if !ok {
                 //But wait!  If the next item in the expression has the optional flag, we can try that instead of failing
                 //Are we at the last node?
                 if !(i < len(ast.Nodes)-1) {
                     log.Println("Failed to match last element in expression ", ast," aborting")
-                    return start, false
+                    return start, false, nil
                 }
                 //Is the next node optional?
                 if findChildNamed(ast.Nodes[i+1], "optionalMarker") == nil {
                     log.Println("Next element is optional, continuing loop")
-                    return start, false
+                    return start, false, nil
                 }
                 //Continue loop at next node
             } else {
-                return pos, ok
+                newAst.Nodes = append(newAst.Nodes, childAst)
+                return pos, ok, &newAst
             }
         }
-        return start, false
+        return start, false, nil
         /*case "rule":
             pos, ok = doParse(findChildNamed(ast, "ruleDecl"), rulesTable, input, newchain, pos)
                 if !ok {
@@ -58,29 +61,33 @@ func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string,
             return pos, true
         */
         case "WHITESPACE":
-            return pos, true
+            return pos, true, &newAst
         /*    if input[pos:pos+1] == " " {
                 pos = pos + 1
-                pos, ok = doParse(ast, rulesTable, input, newchain, pos)
+                pos, ok, _ = doParse(ast, rulesTable, input, newchain, pos)
             }
             return pos, true
         */
         case "optWs":
             if input[pos:pos+1] == " " {
                 pos = pos + 1
-                pos, ok = doParse(ast, rulesTable, input, newchain, pos)
+                var childAst *peg.Ast
+                pos, ok, childAst = doParse(ast, rulesTable, input, newchain, pos)
+                newAst.Nodes = append(newAst.Nodes, childAst)
             }
-            return pos, true
+            return pos, true, &newAst
         case "identifier":
             name := findChildNamed(ast, "ruleName").Token
             fmt.Println("Activating rule '", name, "' in ruleName ", ast)
-            pos, ok = doParse(rulesTable[name], rulesTable, input, newchain, pos)
+            var childAst *peg.Ast
+            pos, ok, childAst = doParse(rulesTable[name], rulesTable, input, newchain, pos)
             if ok {
                 log.Println("Returning success in ruleName")
-                return pos, ok
+                newAst.Nodes = append(newAst.Nodes, childAst)
+                return pos, ok, &newAst
             }
         log.Println("Returning failure in ruleName")
-        return start, false
+        return start, false, nil
         
     }
 
@@ -93,28 +100,30 @@ func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string,
             if input[pos:pos+len(ast.Token)] == ast.Token {
                 log.Printf("Found literal: %v(%v) at %v", ast.Name, ast.Token, pos)
                 pos = pos + len(ast.Token)
-                return pos, true
+                return pos, true, &newAst
             }
         } else {
-            return start, true
+            return start, true, &newAst
         }
     }
 
     if len(ast.Nodes) ==0 {
-        return start, false
+        return start, false, nil
     }
 
 
     for _, v := range ast.Nodes {
-        pos, ok = doParse(v, rulesTable, input, newchain, pos)
+        var childAst *peg.Ast
+        pos, ok, childAst = doParse(v, rulesTable, input, newchain, pos)
+        newAst.Nodes = append(newAst.Nodes, childAst)
         if !ok {
             log.Println("Returning failure from default loop (", ast.Name, ")")
-            return start, ok
+            return start, ok, nil
         }
     }
 
     log.Println("Returning success at end of func")
-    return pos, true
+    return pos, true, &newAst
 }
 
 
@@ -160,11 +169,16 @@ func buildRules(ast *peg.Ast, rules map[string]*peg.Ast) map[string]*peg.Ast {
 
 
 func walkAST(ast *peg.Ast) {
+    brief := true
+    if ast == nil {
+        return
+    }
     prune := map[string]bool{}
     skip := map[string]bool{}
     prune["optWs"] = true
     prune["WHITESPACE"] = true
     prune["ruleEnd"] = true
+    prune["optionalMarker"] = true
     skip["list"] = true
     skip["mexpression"] = true
     switch ast.Name {
@@ -176,24 +190,28 @@ func walkAST(ast *peg.Ast) {
     }   
         _,sok := skip[ast.Name]
         _, ok := prune[ast.Name]
+        if brief && ast.Token != "" {
         if !ok && !sok  {
-            if len(ast.Nodes)>1 {
+            if len(ast.Nodes)>0 {
             fmt.Printf("\n%v[ %v(%v) ", strings.Repeat(" ", indent),  ast.Name, ast.Token)
             indent=indent+indentStep
             } else {
                 fmt.Printf("\n%v%v(%v) ", strings.Repeat(" ", indent),  ast.Name, ast.Token)
             }
     }
+    }
     for _, v := range ast.Nodes {
         if _, ok := prune[ast.Name]; !ok  {
             walkAST(v)
         }
     }
+        if brief && ast.Token != "" {
         if !ok && !sok  {
-            if len(ast.Nodes)>1 {
+            if len(ast.Nodes)>0 {
             indent = indent - indentStep
             fmt.Println(strings.Repeat(" ", indent), "]")
 }
+    }
     }
 }
 
@@ -316,8 +334,13 @@ func main() {
 
     fmt.Println("parsing")
     file2, err := ioutil.ReadFile(dataName)
-    _, ok := startParse(ast, rules,  string(file2), startRule, "", 0)
+    _, ok, tree := startParse(ast, rules,  string(file2), startRule, "", 0)
     if ok {
-        fmt.Printf("Parse completed successfully")
+        fmt.Println("Parse completed successfully")
+        if tree != nil {
+            fmt.Println(tree.Name, tree.Token)
+            walkAST(tree)
+            //fmt.Println(tree)
+        }
     }
 }
