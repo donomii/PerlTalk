@@ -10,6 +10,7 @@ import (
 )
 
 
+var debug = false
 var indent = 0
 var indentStep = 4
 
@@ -28,32 +29,54 @@ func lookupRule(name string, rulesTable map[string]*peg.Ast) *peg.Ast {
     return nil
 }
 
+var parseCache map[string]bool
+
+func registerFail(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string, start int) {
+    key := fmt.Sprintf("%v%v%v%v%v", ast, rulesTable, input, chain, start)
+    parseCache[key] = true
+}
+
+func willFail(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string, start int) bool {
+    key := fmt.Sprintf("%v%v%v%v%v", ast, rulesTable, input, chain, start)
+    _, ok := parseCache[key]
+    return ok
+}
+
 func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string, start int) (int, bool, *peg.Ast) {
+    if willFail(ast, rulesTable,  input, chain, start) {
+        return start, false, nil
+    }
     pos := start
     ok := false
     newchain := fmt.Sprintf("%v->%v(%v)", chain, ast.Name, ast.Token)
     newAst := peg.Ast{Name: ast.Name, Token: ast.Token, Nodes: []*peg.Ast{}, Parent: &peg.Ast{}}
-    log.Println("Parsed so far: ", input[0:start])
-    if len(newchain) > 2000 {
-        log.Fatal("Deep recursion")
-    }
+    fmt.Println("Parsed so far: ", input[0:start])
+    //if len(newchain) > 2000 {
+        //log.Fatal("Deep recursion")
+    //}
     switch ast.Name {
         case "expression":
         for i, v := range ast.Nodes {
             if v.Name != "WHITESPACE" {
                 var childAst *peg.Ast
                 pos, ok, childAst = doParse(v, rulesTable, input, newchain, pos)
-                log.Println("Current AST: ", childAst)
+                //log.Println("Current AST: ", childAst)
                 if !ok {
                     //Are we at the last node?
                     if !(i < len(ast.Nodes)-1) {
+    if debug {
                         log.Println("Failed to match last element in expression ", ast," aborting")
+}
+                        registerFail(ast, rulesTable,  input, chain, start)
                         return start, false, nil
                     }
                     //But wait!  If the next item in the expression has the optional flag, we can try that instead of failing
                     //Is the next node optional?
                     if findChildNamed(ast.Nodes[i+1], "optionalMarker") == nil {
+    if debug {
                         log.Println("Next element is optional, continuing loop in expression")
+}
+                        registerFail(ast, rulesTable,  input, chain, start)
                         return start, false, nil
                     }
                     //Continue loop at next node
@@ -61,20 +84,26 @@ func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string,
                     if childAst != nil {
                         newAst.Nodes = append(newAst.Nodes, childAst)
                     }
+    if debug {
                     log.Println("Returning success from expression", newchain)
+}
                     return pos, ok, &newAst
 
                     //But wait!  If the next item in the expression has the optional flag, we can try that instead of failing
                     //Is the next node optional?
                     if findChildNamed(ast.Nodes[i+1], "optionalMarker") == nil {
+    if debug {
                         log.Println("Next element is optional, exiting expression with success")
+}
                         return start, true, nil
                     }
 
                 }
             }
         }
+    if debug {
         log.Println("Returning true after completing whole expression")
+}
         return start, true, nil
         /*case "rule":
             pos, ok = doParse(findChildNamed(ast, "ruleDecl"), rulesTable, input, newchain, pos)
@@ -101,55 +130,71 @@ func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string,
                 pos = pos + 1
                 var childAst *peg.Ast
                 pos, ok, childAst = doParse(ast, rulesTable, input, newchain, pos)
-                log.Println("Current AST: ", childAst)
+                //log.Println("Current AST: ", childAst)
                     if childAst != nil {
                     newAst.Nodes = append(newAst.Nodes, childAst)
                 }
             }
+    if debug {
             log.Println("Returning success from optional whitespace")
+}
             return pos, true, &newAst
         case "identifier":
             name := findChildNamed(ast, "ruleName").Token
             ruleAst := lookupRule(name, rulesTable)
-            fmt.Println("Activating rule '", name, "' in ruleName ", ruleAst)
+            //fmt.Println("Activating rule '", name, "' in ruleName ", ruleAst)
             var childAst *peg.Ast
             pos, ok, childAst = doParse(ruleAst, rulesTable, input, newchain, pos)
-                log.Println("Current AST: ", childAst)
+                //log.Println("Current AST: ", childAst)
             if ok {
+    if debug {
                 log.Println("Returning success in ruleName (", ast.Name, ")")
+}
                     if childAst != nil {
                 newAst.Nodes = append(newAst.Nodes, childAst)
                 }
                 return pos, ok, &newAst
             }
+    if debug {
         log.Println("Returning failure in ruleName (", ast.Name, ")")
+}
+        registerFail(ast, rulesTable,  input, chain, start)
         return start, false, nil
     }
 
-    fmt.Printf("%v (%v) vs '%v' at %v\n", newchain, ast.Token, input[pos:pos+len(ast.Token)], pos)
+    if debug {
+    log.Printf("%v (%v)(%v) vs '%v' at %v\n", ast.Name, ast.Token, []byte(ast.Token), input[pos:pos+len(ast.Token)], pos)
+}
 
-    if ast.Name != "ruleName" && ast.Token != "" && len(ast.Token)>0 {
-        fmt.Println("Checking for literal '", ast.Token, "'")
-        if ast.Token != "|" || ast.Name == "optionalMarker"  {
+    if ast.Name != "ruleName" && ast.Name != "optionalMarker" && ast.Token != "" && len(ast.Token)>0 {
+        //fmt.Println("Checking for literal '", ast.Token, "'")
+        //if ast.Token != "|" {
+        if pos+len(ast.Token) < len(input) {
             if input[pos:pos+len(ast.Token)] == ast.Token {
+    if debug {
                 log.Printf("Found literal: %v(%v) at %v", ast.Name, ast.Token, pos)
+}
                 pos = pos + len(ast.Token)
+    if debug {
                 log.Println("Returning success from literal (", ast.Token, ")")
+}
                 return pos, true, &newAst
             }
-        } else {
-            log.Println("Returning success from optional literal (", ast.Token, ")")
-            return start, true, &newAst
         }
     }
 
     if len(ast.Nodes) ==0 && ast.Token == "" {
+    if debug {
         log.Println("Returning true from empty literal")
+}
         return start, true, nil
     }
 
     if len(ast.Nodes) ==0 {
+    if debug {
         log.Println("Returning false from terminal node")
+}
+        registerFail(ast, rulesTable,  input, chain, start)
         return start, false, nil
     }
     
@@ -157,21 +202,25 @@ func doParse(ast *peg.Ast, rulesTable map[string]*peg.Ast,  input, chain string,
 
 
     for _, v := range ast.Nodes {
-        if v.Name != "WHITESPACE" {
+        if v.Name != "WHITESPACE" && v.Name != "optionalMarker" {
             var childAst *peg.Ast
             pos, ok, childAst = doParse(v, rulesTable, input, newchain, pos)
-                log.Println("Current AST: ", childAst)
+                //log.Println("Current AST: ", childAst)
                     if childAst != nil {
             newAst.Nodes = append(newAst.Nodes, childAst)
             }
             if !ok {
+    if debug {
                 log.Println("Returning failure from default loop (", ast.Name, ")")
+}
                 return start, ok, nil
             }
         }
     }
 
+    if debug {
     log.Println("Returning success at end of func(", ast.Name, ")")
+}
     return pos, true, &newAst
 }
 
@@ -362,6 +411,7 @@ func buildParser() *peg.Parser {
 
 
 func main() {
+    parseCache = map[string]bool{}
     fileName := os.Args[1]
     dataName := os.Args[2]
     startRule := os.Args[3]
